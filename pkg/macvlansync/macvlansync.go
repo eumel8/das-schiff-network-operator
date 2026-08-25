@@ -193,6 +193,12 @@ func (s *Syncer) watchFDBEvents() {
 // NTF_SELF flag is deleted from a tracked vlan.* interface, we immediately
 // delete the corresponding bridge-learned entry from the l2v.* bridge port.
 func (s *Syncer) processEvent(update *netlink.NeighUpdate) {
+	// Log ALL delete events for debugging (temporary).
+	if update.Type == unix.RTM_DELNEIGH && isUnicast(update.HardwareAddr) {
+		log.Printf("macvlansync: DEBUG DEL event linkIdx=%d family=%d flags=0x%x state=0x%x mac=%s",
+			update.LinkIndex, update.Family, update.Flags, update.State, update.HardwareAddr)
+	}
+
 	// We only care about FDB deletions (RTM_DELNEIGH) with NTF_SELF flag
 	// on tracked vlan.* interfaces.
 	if update.Type != unix.RTM_DELNEIGH {
