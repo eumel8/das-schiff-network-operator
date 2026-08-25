@@ -14,5 +14,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -o macvlansync-watcher main.go
 FROM alpine:3.21
 WORKDIR /
 COPY --from=builder /workspace/macvlansync-watcher .
-USER 65532:65532
+# Requires root (UID 0) for NET_ADMIN capabilities needed to delete bridge FDB entries.
+USER 0:0
 ENTRYPOINT ["/macvlansync-watcher"]
