@@ -199,14 +199,14 @@ func (s *Syncer) processEvent(update *netlink.NeighUpdate) {
 		return
 	}
 
-	// FDB entries have Family == AF_BRIDGE.
-	if update.Family != unix.AF_BRIDGE {
+	// FDB entries are delivered with State == NUD_PERMANENT and NTF_SELF flag.
+	// The Family field may be AF_BRIDGE or AF_UNSPEC depending on kernel version.
+	// We identify FDB entries by checking NTF_SELF + NUD_PERMANENT state.
+	if update.Flags&netlink.NTF_SELF == 0 {
 		return
 	}
 
-	// Must have NTF_SELF flag (entry was on the interface itself, not
-	// on a bridge port).
-	if update.Flags&netlink.NTF_SELF == 0 {
+	if update.State != netlink.NUD_PERMANENT {
 		return
 	}
 
