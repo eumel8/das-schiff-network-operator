@@ -43,6 +43,7 @@ import (
 	networkv1alpha1 "github.com/telekom/das-schiff-network-operator/api/v1alpha1"
 	controllerfrr "github.com/telekom/das-schiff-network-operator/controllers/agent-cra-frr"
 	"github.com/telekom/das-schiff-network-operator/pkg/cra-frr"
+	"github.com/telekom/das-schiff-network-operator/pkg/macvlansync"
 	"github.com/telekom/das-schiff-network-operator/pkg/monitoring"
 	reconcilerfrr "github.com/telekom/das-schiff-network-operator/pkg/reconciler/agent-cra-frr"
 	"github.com/telekom/das-schiff-network-operator/pkg/reconciler/common"
@@ -176,6 +177,15 @@ func initComponents(mgr manager.Manager, nodeConfigPath string, craManager *cra.
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return fmt.Errorf("unable to set up ready check: %w", err)
+	}
+
+	// Start macvlan FDB sync to immediately clean up stale bridge-learned
+	// entries when macvlan interfaces are destroyed during pod deletion.
+	// This prevents FRR from advertising stale EVPN Type-2 routes that
+	// cause IPv6 DAD failures on replacement pods.
+	fdbSyncer := macvlansync.New()
+	if err := fdbSyncer.Start(); err != nil {
+		setupLog.Error(err, "failed to start macvlan FDB sync (non-fatal)")
 	}
 
 	r, err := setupReconcilers(mgr, nodeConfigPath, craManager)
