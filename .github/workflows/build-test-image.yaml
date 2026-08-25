@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - fix/macvlan-fdb-stale-cleanup
+    tags:
+      - 'v*-macvlansync'
 
 jobs:
   build:
@@ -25,11 +27,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract version from tag or branch
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # v0.1.0-macvlansync → 0.1.0
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+            VERSION="${VERSION%-macvlansync}"
+            echo "tag=${VERSION}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=latest" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build and push macvlansync-watcher
         uses: docker/build-push-action@v6
         with:
           context: .
           file: macvlansync-watcher.Dockerfile
           push: true
-          tags: ghcr.io/eumel8/macvlansync-watcher:latest
+          tags: ghcr.io/eumel8/macvlansync-watcher:${{ steps.version.outputs.tag }}
           platforms: linux/amd64
