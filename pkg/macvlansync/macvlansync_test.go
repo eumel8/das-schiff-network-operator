@@ -84,21 +84,21 @@ func TestProcessEvent_IgnoresMulticast(t *testing.T) {
 	// No panic, no action — success.
 }
 
-func TestProcessEvent_IgnoresNonPermanent(t *testing.T) {
+func TestProcessEvent_IgnoresNonSelf(t *testing.T) {
 	s := &Syncer{
 		tracked: map[int]*trackedInterface{
 			10: {vlanName: "vlan.1007", bridgePortIdx: 20, bridgeIdx: 30},
 		},
 	}
 
-	// NUD_REACHABLE (not PERMANENT) should be ignored.
+	// No NTF_SELF flag should be ignored.
 	s.processEvent(&netlink.NeighUpdate{
 		Type: unix.RTM_DELNEIGH,
 		Neigh: netlink.Neigh{
 			LinkIndex:    10,
 			Family:       unix.AF_BRIDGE,
-			State:        netlink.NUD_REACHABLE,
-			Flags:        netlink.NTF_SELF,
+			State:        netlink.NUD_NOARP,
+			Flags:        0, // no NTF_SELF
 			HardwareAddr: net.HardwareAddr{0x02, 0x03, 0x04, 0x05, 0x06, 0x07},
 		},
 	})

@@ -78,9 +78,9 @@ func (s *Syncer) Start() error {
 		return nil
 	}
 
-	for _, t := range s.tracked {
+	for idx, t := range s.tracked {
 		log.Printf("macvlansync: tracking %s (idx=%d) → bridge port %s (idx=%d) → bridge %s (idx=%d)",
-			t.vlanName, 0, t.bridgePortName, t.bridgePortIdx, t.bridgeName, t.bridgeIdx)
+			t.vlanName, idx, t.bridgePortName, t.bridgePortIdx, t.bridgeName, t.bridgeIdx)
 	}
 
 	go s.watchFDBEvents()
@@ -193,26 +193,17 @@ func (s *Syncer) watchFDBEvents() {
 // NTF_SELF flag is deleted from a tracked vlan.* interface, we immediately
 // delete the corresponding bridge-learned entry from the l2v.* bridge port.
 func (s *Syncer) processEvent(update *netlink.NeighUpdate) {
-	// Log ALL delete events for debugging (temporary).
-	if update.Type == unix.RTM_DELNEIGH && isUnicast(update.HardwareAddr) {
-		log.Printf("macvlansync: DEBUG DEL event linkIdx=%d family=%d flags=0x%x state=0x%x mac=%s",
-			update.LinkIndex, update.Family, update.Flags, update.State, update.HardwareAddr)
-	}
-
 	// We only care about FDB deletions (RTM_DELNEIGH) with NTF_SELF flag
 	// on tracked vlan.* interfaces.
 	if update.Type != unix.RTM_DELNEIGH {
 		return
 	}
 
-	// FDB entries are delivered with State == NUD_PERMANENT and NTF_SELF flag.
-	// The Family field may be AF_BRIDGE or AF_UNSPEC depending on kernel version.
-	// We identify FDB entries by checking NTF_SELF + NUD_PERMANENT state.
+	// FDB entries are identified by the NTF_SELF flag (entry belongs to the
+	// interface driver, not the bridge). The deletion event may carry various
+	// state values (NUD_NOARP, NUD_PERMANENT, etc.) depending on kernel version
+	// so we do not filter on state.
 	if update.Flags&netlink.NTF_SELF == 0 {
-		return
-	}
-
-	if update.State != netlink.NUD_PERMANENT {
 		return
 	}
 
