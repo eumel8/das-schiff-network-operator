@@ -1,0 +1,35 @@
+name: Build macvlansync-watcher test image
+
+on:
+  push:
+    branches:
+      - fix/macvlan-fdb-stale-cleanup
+
+jobs:
+  build:
+    name: Build macvlansync-watcher
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push macvlansync-watcher
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: macvlansync-watcher.Dockerfile
+          push: true
+          tags: ghcr.io/eumel8/macvlansync-watcher:latest
+          platforms: linux/amd64
