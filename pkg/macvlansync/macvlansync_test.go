@@ -3,9 +3,6 @@ package macvlansync
 import (
 	"net"
 	"testing"
-
-	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 )
 
 func TestIsUnicast(t *testing.T) {
@@ -28,79 +25,18 @@ func TestIsUnicast(t *testing.T) {
 	}
 }
 
-func TestProcessEvent_IgnoresNonDelete(t *testing.T) {
-	s := &Syncer{
-		tracked: map[int]*trackedInterface{
-			10: {vlanName: "vlan.1007", bridgePortIdx: 20, bridgeIdx: 30},
-		},
+func TestNew(t *testing.T) {
+	s := New()
+	if s.vlanPrefix != "vlan." {
+		t.Errorf("expected vlanPrefix 'vlan.', got %q", s.vlanPrefix)
 	}
-
-	// RTM_NEWNEIGH should be ignored.
-	s.processEvent(&netlink.NeighUpdate{
-		Type: unix.RTM_NEWNEIGH,
-		Neigh: netlink.Neigh{
-			LinkIndex:    10,
-			Family:       unix.AF_BRIDGE,
-			Flags:        netlink.NTF_SELF,
-			HardwareAddr: net.HardwareAddr{0x02, 0x03, 0x04, 0x05, 0x06, 0x07},
-		},
-	})
-	// No panic, no action — success.
-}
-
-func TestProcessEvent_IgnoresUntrackedInterface(t *testing.T) {
-	s := &Syncer{
-		tracked: map[int]*trackedInterface{},
+	if s.bridgePortPrefix != "l2v." {
+		t.Errorf("expected bridgePortPrefix 'l2v.', got %q", s.bridgePortPrefix)
 	}
-
-	s.processEvent(&netlink.NeighUpdate{
-		Type: unix.RTM_DELNEIGH,
-		Neigh: netlink.Neigh{
-			LinkIndex:    999,
-			Family:       unix.AF_BRIDGE,
-			Flags:        netlink.NTF_SELF,
-			HardwareAddr: net.HardwareAddr{0x02, 0x03, 0x04, 0x05, 0x06, 0x07},
-		},
-	})
-	// No panic, no action — success.
-}
-
-func TestProcessEvent_IgnoresMulticast(t *testing.T) {
-	s := &Syncer{
-		tracked: map[int]*trackedInterface{
-			10: {vlanName: "vlan.1007", bridgePortIdx: 20, bridgeIdx: 30},
-		},
+	if s.tracked == nil {
+		t.Error("tracked map is nil")
 	}
-
-	s.processEvent(&netlink.NeighUpdate{
-		Type: unix.RTM_DELNEIGH,
-		Neigh: netlink.Neigh{
-			LinkIndex:    10,
-			Family:       unix.AF_BRIDGE,
-			Flags:        netlink.NTF_SELF,
-			HardwareAddr: net.HardwareAddr{0x33, 0x33, 0x00, 0x00, 0x00, 0x01},
-		},
-	})
-	// No panic, no action — success.
-}
-
-func TestProcessEvent_IgnoresNonSelf(t *testing.T) {
-	s := &Syncer{
-		tracked: map[int]*trackedInterface{
-			10: {vlanName: "vlan.1007", bridgePortIdx: 20, bridgeIdx: 30},
-		},
+	if s.done == nil {
+		t.Error("done channel is nil")
 	}
-
-	// No NTF_SELF flag should be ignored.
-	s.processEvent(&netlink.NeighUpdate{
-		Type: unix.RTM_DELNEIGH,
-		Neigh: netlink.Neigh{
-			LinkIndex:    10,
-			Family:       unix.AF_BRIDGE,
-			State:        netlink.NUD_NOARP,
-			Flags:        0, // no NTF_SELF
-			HardwareAddr: net.HardwareAddr{0x02, 0x03, 0x04, 0x05, 0x06, 0x07},
-		},
-	})
-	// No panic, no action — success.
 }

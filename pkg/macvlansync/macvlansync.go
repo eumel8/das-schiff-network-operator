@@ -19,6 +19,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -37,9 +38,6 @@ type Syncer struct {
 	// tracked maps vlan interface indices to their bridge port info.
 	tracked   map[int]*trackedInterface
 	trackedMu sync.RWMutex
-
-	// neighSubscribeFn allows injection for testing.
-	neighSubscribeFn func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, options netlink.NeighSubscribeOptions) error
 
 	done chan struct{}
 }
@@ -60,14 +58,12 @@ func New() *Syncer {
 		vlanPrefix:       "vlan.",
 		bridgePortPrefix: "l2v.",
 		tracked:          make(map[int]*trackedInterface),
-		neighSubscribeFn: netlink.NeighSubscribeWithOptions,
 		done:             make(chan struct{}),
 	}
 }
 
 // Start discovers all vlan.* interfaces, builds the vlan→bridge mapping,
-// takes a snapshot of current FDB state, and subscribes to netlink FDB
-// events for immediate stale-MAC cleanup.
+// takes a snapshot of current FDB state, and starts polling for stale MACs.
 func (s *Syncer) Start() error {
 	if err := s.discoverInterfaces(); err != nil {
 		return fmt.Errorf("failed to discover interfaces: %w", err)
@@ -83,7 +79,7 @@ func (s *Syncer) Start() error {
 			t.vlanName, idx, t.bridgePortName, t.bridgePortIdx, t.bridgeName, t.bridgeIdx)
 	}
 
-	go s.watchFDBEvents()
+	go s.pollFDB()
 	return nil
 }
 
@@ -151,91 +147,90 @@ func (s *Syncer) discoverInterfaces() error {
 	return nil
 }
 
-// watchFDBEvents subscribes to netlink neighbor (FDB) events and processes
-// deletions of "self permanent" entries on tracked vlan.* interfaces.
-func (s *Syncer) watchFDBEvents() {
-	for {
-		updates := make(chan netlink.NeighUpdate)
-		watchDone := make(chan struct{})
+// pollFDB periodically reads the FDB of each tracked vlan.* interface and
+// removes stale bridge-learned entries from the corresponding l2v.* bridge
+// port when a "self permanent" MAC disappears.
+func (s *Syncer) pollFDB() {
+	log.Println("macvlansync: starting FDB poll loop (interval=1s)")
 
-		err := s.neighSubscribeFn(updates, watchDone, netlink.NeighSubscribeOptions{
-			Namespace:    nil,
-			ErrorCallback: func(err error) {
-				log.Printf("macvlansync: netlink error: %v", err)
-			},
-		})
-		if err != nil {
-			log.Printf("macvlansync: failed to subscribe to FDB events: %v", err)
+	// previousMACs holds the last-seen set of self-permanent unicast MACs
+	// per tracked vlan interface index.
+	previousMACs := make(map[int]map[string]struct{})
+
+	// Initialize with current state.
+	s.trackedMu.RLock()
+	for idx, info := range s.tracked {
+		macs := s.readSelfPermanentMACs(info.vlanName, idx)
+		previousMACs[idx] = macs
+	}
+	s.trackedMu.RUnlock()
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.trackedMu.RLock()
+			for idx, info := range s.tracked {
+				currentMACs := s.readSelfPermanentMACs(info.vlanName, idx)
+
+				// Find MACs that disappeared.
+				prev := previousMACs[idx]
+				for macStr := range prev {
+					if _, exists := currentMACs[macStr]; !exists {
+						mac, err := net.ParseMAC(macStr)
+						if err != nil {
+							continue
+						}
+						log.Printf("macvlansync: MAC %s disappeared from %s — deleting from bridge port %s",
+							macStr, info.vlanName, info.bridgePortName)
+
+						if err := netlink.NeighDel(&netlink.Neigh{
+							LinkIndex:    info.bridgePortIdx,
+							Family:       unix.AF_BRIDGE,
+							HardwareAddr: mac,
+							MasterIndex:  info.bridgeIdx,
+						}); err != nil {
+							log.Printf("macvlansync: failed to delete FDB entry for %s on %s: %v (may already be gone)",
+								macStr, info.bridgePortName, err)
+						} else {
+							log.Printf("macvlansync: successfully removed stale FDB entry for %s from %s",
+								macStr, info.bridgePortName)
+						}
+					}
+				}
+
+				previousMACs[idx] = currentMACs
+			}
+			s.trackedMu.RUnlock()
+		case <-s.done:
 			return
 		}
-		log.Println("macvlansync: subscribed to netlink neighbor events")
-
-		for {
-			select {
-			case update, ok := <-updates:
-				if !ok {
-					log.Println("macvlansync: update channel closed, resubscribing")
-					goto resubscribe
-				}
-				s.processEvent(&update)
-			case <-s.done:
-				close(watchDone)
-				return
-			}
-		}
-
-	resubscribe:
-		close(watchDone)
 	}
 }
 
-// processEvent handles a single FDB neighbor event. When a unicast MAC with
-// NTF_SELF flag is deleted from a tracked vlan.* interface, we immediately
-// delete the corresponding bridge-learned entry from the l2v.* bridge port.
-func (s *Syncer) processEvent(update *netlink.NeighUpdate) {
-	// We only care about FDB deletions (RTM_DELNEIGH) with NTF_SELF flag
-	// on tracked vlan.* interfaces.
-	if update.Type != unix.RTM_DELNEIGH {
-		return
+// readSelfPermanentMACs reads the FDB of the given interface and returns
+// all unicast MACs that have the "self permanent" flags.
+func (s *Syncer) readSelfPermanentMACs(name string, linkIdx int) map[string]struct{} {
+	result := make(map[string]struct{})
+
+	neighs, err := netlink.NeighList(linkIdx, unix.AF_BRIDGE)
+	if err != nil {
+		log.Printf("macvlansync: failed to list FDB for %s (idx=%d): %v", name, linkIdx, err)
+		return result
 	}
 
-	// FDB entries are identified by the NTF_SELF flag (entry belongs to the
-	// interface driver, not the bridge). The deletion event may carry various
-	// state values (NUD_NOARP, NUD_PERMANENT, etc.) depending on kernel version
-	// so we do not filter on state.
-	if update.Flags&netlink.NTF_SELF == 0 {
-		return
+	for i := range neighs {
+		n := &neighs[i]
+		// Match "self permanent" unicast entries: MasterIndex==0 means it's on
+		// the interface itself (self), not on a bridge port.
+		if n.MasterIndex == 0 && n.Flags&netlink.NTF_SELF != 0 && isUnicast(n.HardwareAddr) {
+			result[n.HardwareAddr.String()] = struct{}{}
+		}
 	}
 
-	// Skip multicast/broadcast MACs.
-	if !isUnicast(update.HardwareAddr) {
-		return
-	}
-
-	s.trackedMu.RLock()
-	info, ok := s.tracked[update.LinkIndex]
-	s.trackedMu.RUnlock()
-	if !ok {
-		return
-	}
-
-	mac := update.HardwareAddr
-	log.Printf("macvlansync: detected FDB deletion on %s: MAC %s — cleaning up bridge %s via port %s",
-		info.vlanName, mac, info.bridgeName, info.bridgePortName)
-
-	// Delete the stale bridge-learned FDB entry on the bridge port.
-	if err := netlink.NeighDel(&netlink.Neigh{
-		LinkIndex:    info.bridgePortIdx,
-		Family:       unix.AF_BRIDGE,
-		HardwareAddr: mac,
-		MasterIndex:  info.bridgeIdx,
-	}); err != nil {
-		log.Printf("macvlansync: failed to delete FDB entry for %s on %s: %v (may already be gone)",
-			mac, info.bridgePortName, err)
-	} else {
-		log.Printf("macvlansync: successfully removed stale FDB entry for %s from %s",
-			mac, info.bridgePortName)
-	}
+	return result
 }
 
 // isUnicast returns true if the MAC address is a unicast address
