@@ -78,9 +78,15 @@ func disableDADInNetns(nsPath string) error {
 	}
 
 	// Set sysctls in the target namespace.
+	// We must set BOTH conf.default (inherited by new interfaces) AND
+	// conf.all (fallback for some kernel code paths). The effective value
+	// for dad_transmits is max(all, interface), so we need default=0 to
+	// ensure new interfaces get dad_transmits=0 from creation.
 	sysctls := map[string]string{
-		"net/ipv6/conf/all/dad_transmits": "0",
-		"net/ipv6/conf/all/accept_dad":    "0",
+		"net/ipv6/conf/all/dad_transmits":     "0",
+		"net/ipv6/conf/all/accept_dad":        "0",
+		"net/ipv6/conf/default/dad_transmits": "0",
+		"net/ipv6/conf/default/accept_dad":    "0",
 	}
 	for k, v := range sysctls {
 		if err := setSysctl(k, v); err != nil {
